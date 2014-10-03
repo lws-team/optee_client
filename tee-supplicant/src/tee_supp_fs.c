@@ -31,12 +31,7 @@
 #include <dirent.h>
 #include <unistd.h>
 #include <string.h>
-#include <limits.h>
 #include <tee_supp_fs.h>
-#include <pthread.h>
-#include "handle.h"
-
-#include <assert.h>
 
 /*
  * Operations and defines shared with TEE.
@@ -114,10 +109,6 @@ struct tee_fs_rpc {
 	uint32_t len;
 	int res;
 };
-
-static pthread_mutex_t dir_handle_db_mutex = PTHREAD_MUTEX_INITIALIZER;
-static struct handle_db dir_handle_db =
-		HANDLE_DB_INITIALIZER_WITH_MUTEX(&dir_handle_db_mutex);
 
 /* Function to convert TEE open flags to UNIX IO */
 static int tee_supp_fs_conv_oflags(int in)
@@ -278,56 +269,46 @@ static int tee_supp_fs_mkdir(struct tee_fs_rpc *fsrpc)
 	return mkdir(fname, mode);
 }
 
-static int tee_supp_fs_opendir(struct tee_fs_rpc *fsrpc)
+static DIR *tee_supp_fs_opendir(struct tee_fs_rpc *fsrpc)
 {
 	char fname[PATH_MAX];
 	DIR *dir;
-	int handle;
 
 	tee_supp_fs_create_fname((char *)(fsrpc + 1), fname);
 
 	dir = opendir(fname);
-	if (!dir)
-		return -1;
 
-	handle = handle_get(&dir_handle_db, dir);
-	if (handle < 0)
-		closedir(dir);
-
-	return handle;
+	return dir;
 }
 
 static int tee_supp_fs_closedir(struct tee_fs_rpc *fsrpc)
 {
-	DIR *dir = handle_put(&dir_handle_db, fsrpc->arg);
-
-	return closedir(dir);
+	return closedir((DIR *)fsrpc->arg);
 }
 
-static int tee_supp_fs_readdir(struct tee_fs_rpc *fsrpc)
+static struct dirent *tee_supp_fs_readdir(struct tee_fs_rpc *fsrpc)
 {
-	DIR *dir = handle_lookup(&dir_handle_db, fsrpc->arg);
-	struct dirent *dirent;
+	struct dirent *dir;
 	size_t len;
 
 	do
-		dirent = readdir(dir);
-	while (dirent != NULL && dirent->d_name[0] == '.');
+		dir = readdir((DIR *)fsrpc->arg);
+	while (dir != NULL && dir->d_name[0] == '.');
 
-	if (dirent == NULL) {
+	if (dir == NULL) {
 		fsrpc->len = 0;
-		return -1;
+		return NULL;
 	}
 
-	len = strlen(dirent->d_name);
+	len = strlen(dir->d_name);
 	if (len > PATH_MAX)
-		return -1;
+		return NULL;
 
 	len++;
-	memcpy((char *)(fsrpc + 1), dirent->d_name, len);
+	memcpy((char *)(fsrpc + 1), dir->d_name, len);
 	fsrpc->len = len;
 
-	return 0;
+	return dir;
 }
 
 static int tee_supp_fs_rmdir(struct tee_fs_rpc *fsrpc)
@@ -368,7 +349,8 @@ int tee_supp_fs_init(void)
 int tee_supp_fs_process(void *cmd, size_t cmd_size)
 {
 	struct tee_fs_rpc *fsrpc = cmd;
-	int ret = -1;
+	void *pt;
+	int ret = -1, setres = 1;
 
 	if (cmd_size < sizeof(struct tee_fs_rpc))
 		return ret;
@@ -405,13 +387,19 @@ int tee_supp_fs_process(void *cmd, size_t cmd_size)
 		ret = tee_supp_fs_mkdir(fsrpc);
 		break;
 	case TEE_FS_OPENDIR:
-		ret = tee_supp_fs_opendir(fsrpc);
+		pt = tee_supp_fs_opendir(fsrpc);
+		ret = (pt ? 0 : -1);
+		fsrpc->res = (int)pt;
+		setres = 0;
 		break;
 	case TEE_FS_CLOSEDIR:
 		ret = tee_supp_fs_closedir(fsrpc);
 		break;
 	case TEE_FS_READDIR:
-		ret = tee_supp_fs_readdir(fsrpc);
+		pt = tee_supp_fs_readdir(fsrpc);
+		ret = (pt ? 0 : -1);
+		fsrpc->res = (int)pt;
+		setres = 0;
 		break;
 	case TEE_FS_RMDIR:
 		ret = tee_supp_fs_rmdir(fsrpc);
@@ -423,7 +411,8 @@ int tee_supp_fs_process(void *cmd, size_t cmd_size)
 		break;
 	}
 
-	fsrpc->res = ret;
+	if (setres)
+		fsrpc->res = ret;
 
 	return ret;
 }
