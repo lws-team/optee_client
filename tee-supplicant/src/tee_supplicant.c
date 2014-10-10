@@ -134,7 +134,7 @@ static void free_shared_memory_with_fd(int fd)
 {
 	struct share_mem_linked_list *list;
 	for (list = shared_memory_list; list; list = list->next) {
-		if (list->shared_mem.fd == fd)
+		if (list->shared_mem.d.fd == fd)
 			break;
 	}
 
@@ -182,16 +182,16 @@ static TEEC_SharedMemory *add_shared_memory(int fd, size_t size)
 	}
 
 	shared_mem->size = size;
-	shared_mem->fd = shm.fd_shm;
+	shared_mem->d.fd = shm.fd_shm;
 
 	shared_mem->buffer = mmap(NULL, size,
 				  PROT_READ | PROT_WRITE, MAP_SHARED,
-				  shared_mem->fd, 0);
+				  shared_mem->d.fd, 0);
 
 	if (shared_mem->buffer == (void *)MAP_FAILED) {
 		EMSG("mmap(%d) failed - Error = %s", size, strerror(errno));
 		shared_mem->buffer = 0;
-		close(shared_mem->fd);
+		close(shared_mem->d.fd);
 		return 0;
 	}
 
@@ -221,19 +221,19 @@ static int get_param(int fd, struct tee_rpc_invoke *inv, const uint32_t idx,
 	memset(shared_mem, 0, sizeof(TEEC_SharedMemory));
 	shared_mem->size = shm.size;
 	shared_mem->flags = shm.flags;
-	shared_mem->fd = shm.fd_shm;
+	shared_mem->d.fd = shm.fd_shm;
 
-	DMSG("size %d fd_shm %d", shared_mem->size, shared_mem->fd);
+	DMSG("size %d fd_shm %d", shared_mem->size, shared_mem->d.fd);
 
 	shared_mem->buffer = mmap(NULL, shared_mem->size,
 				     PROT_READ | PROT_WRITE, MAP_SHARED,
-				     shared_mem->fd, 0);
+				     shared_mem->d.fd, 0);
 
 	if (shared_mem->buffer == (void *)MAP_FAILED) {
 		dprintf(ERROR, "mmap(%d, %p) failed - Error = %s\n",
 			inv->cmds[idx].size, inv->cmds[idx].buffer,
 			strerror(errno));
-		close(shared_mem->fd);
+		close(shared_mem->d.fd);
 		return -1;
 	}
 	/* Erase value, since we don't want to send back input memory to TEE. */
@@ -268,7 +268,7 @@ static int alloc_param(int fd, struct tee_rpc_invoke *inv, const uint32_t idx,
 	*va = inv->cmds[idx].buffer;
 	inv->cmds[idx].size = size;
 	inv->cmds[idx].type = TEE_RPC_BUFFER;
-	inv->cmds[idx].fd = shared_mem->fd;
+	inv->cmds[idx].fd = shared_mem->d.fd;
 
 	return 0;
 }
@@ -282,7 +282,7 @@ static void free_param(TEEC_SharedMemory *shared_mem)
 		EMSG("munmap(%p, %d) failed - Error = %s",
 		     shared_mem->buffer, shared_mem->size,
 		     strerror(errno));
-	close(shared_mem->fd);
+	close(shared_mem->d.fd);
 	OUTMSG();
 }
 
@@ -403,15 +403,15 @@ int main(int argc, char *argv[])
 	int n = 0;
 	char devpath[TEEC_MAX_DEVNAME_SIZE];
 
-	sprintf(devpath, "/dev/opteearm3200");
-	sprintf(devname1, "optee_arm32");
+	sprintf(devpath, "/dev/opteearmtz00");
+	sprintf(devname1, "optee_armtz");
 	sprintf(devname2, "teetz");
 
 	while (--argc) {
 		n++;
-		if (strncmp(argv[n], "opteearm3200", 12) == 0) {
-			snprintf(devpath, TEEC_MAX_DEVNAME_SIZE, "%s", "/dev/opteearm3200");
-			snprintf(devname1, TEEC_MAX_DEVNAME_SIZE, "%s", "optee_arm32");
+		if (strncmp(argv[n], "opteearmtz00", 12) == 0) {
+			snprintf(devpath, TEEC_MAX_DEVNAME_SIZE, "%s", "/dev/opteearmtz00");
+			snprintf(devname1, TEEC_MAX_DEVNAME_SIZE, "%s", "optee_armtz");
 			snprintf(devname2, TEEC_MAX_DEVNAME_SIZE, "%s", "teetz");
 		} else {
 			EMSG("Invalid argument #%d", n);
