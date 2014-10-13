@@ -161,7 +161,7 @@ TEEC_Result TEEC_AllocateSharedMemory(TEEC_Context *context,
 		     strerror(errno));
 		return TEEC_ERROR_OUT_OF_MEMORY;
 	}
-	DMSG("fd %d size %d", shared_memory->d.fd, shared_memory->size);
+	DMSG("fd %d size %zu", shared_memory->d.fd, shared_memory->size);
 
 	/*
 	 * Map memory to current user space process.
