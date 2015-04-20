@@ -293,7 +293,7 @@ static TEEC_Result teec_pre_process_partial(uint32_t param_type,
 		break;
 	case TEEC_MEMREF_PARTIAL_OUTPUT:
 		req_shm_flags = TEEC_MEM_OUTPUT;
-		param->attr = TEESMC_ATTR_TYPE_MEMREF_INPUT;
+		param->attr = TEESMC_ATTR_TYPE_MEMREF_OUTPUT;
 		break;
 	case TEEC_MEMREF_PARTIAL_INOUT:
 		req_shm_flags = TEEC_MEM_OUTPUT | TEEC_MEM_INPUT;
