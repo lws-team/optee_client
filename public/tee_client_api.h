@@ -29,8 +29,9 @@
 #ifndef TEE_CLIENT_API_H
 #define TEE_CLIENT_API_H
 
-#include <stdint.h>
+#include <stdbool.h>
 #include <stddef.h>
+#include <stdint.h>
 
 /*
  * Defines the number of available memory references in an open session or
@@ -247,6 +248,7 @@ typedef uint32_t TEEC_Result;
 typedef struct {
 	/* Implementation defined */
 	int fd;
+	bool reg_mem;
 } TEEC_Context;
 
 /**
@@ -287,6 +289,8 @@ typedef struct {
 	int id;
 	size_t alloced_size;
 	void *shadow_buffer;
+	int reg_mem_fd;
+	bool buffer_allocated;
 } TEEC_SharedMemory;
 
 /**
