@@ -18,6 +18,7 @@ TEES_SRCS	:= tee_supplicant.c \
 		   teec_ta_load.c \
 		   tee_supp_fs.c \
 		   rpmb.c \
+		   tee_socket.c \
 		   handle.c
 
 ifeq ($(RPMB_EMU),1)
