@@ -27,6 +27,7 @@
  * POSSIBILITY OF SUCH DAMAGE.
  */
 
+#include <assert.h>
 #include <dirent.h>
 #include <errno.h>
 #include <fcntl.h>
@@ -80,9 +81,66 @@ struct tee_shm {
 	struct tee_shm *next;
 };
 
+struct thread_arg {
+	int fd;
+	bool abort;
+	size_t num_waiters;
+	pthread_mutex_t mutex;
+};
+
 static struct tee_shm *shm_head;
 
 static const char *ta_dir;
+
+static void *thread_main(void *a);
+
+static void mutex_lock(pthread_mutex_t *mu)
+{
+	int e = pthread_mutex_lock(mu);
+
+	if (e) {
+		EMSG("pthread_mutex_lock: %s", strerror(e));
+		EMSG("terminating...");
+		exit(EXIT_FAILURE);
+	}
+}
+
+static void mutex_unlock(pthread_mutex_t *mu)
+{
+	int e = pthread_mutex_unlock(mu);
+
+	if (e) {
+		EMSG("pthread_mutex_unlock: %s", strerror(e));
+		EMSG("terminating...");
+		exit(EXIT_FAILURE);
+	}
+}
+
+static size_t num_waiters_inc(struct thread_arg *arg)
+{
+	size_t ret;
+
+	mutex_lock(&arg->mutex);
+	arg->num_waiters++;
+	assert(arg->num_waiters);
+	ret = arg->num_waiters;
+	mutex_unlock(&arg->mutex);
+
+	return ret;
+}
+
+static size_t num_waiters_dec(struct thread_arg *arg)
+{
+	size_t ret;
+
+	mutex_lock(&arg->mutex);
+	assert(arg->num_waiters);
+	arg->num_waiters--;
+	ret = arg->num_waiters;
+	mutex_unlock(&arg->mutex);
+
+	return ret;
+}
 
 static int get_value(size_t num_params, struct tee_ioctl_param *params,
 		     const uint32_t idx, struct tee_ioctl_param_value **value)
@@ -394,22 +452,132 @@ static bool find_params(union tee_rpc_invoke *request, uint32_t *func,
 	return true;
 }
 
+static bool spawn_thread(struct thread_arg *arg)
+{
+	pthread_t tid;
+	int e;
+
+	DMSG("Spawning a new thread");
+
+	/*
+	 * Increase number of waiters now to avoid starting another thread
+	 * before this thread has been scheduled.
+	 */
+	num_waiters_inc(arg);
+
+	e = pthread_create(&tid, NULL, thread_main, arg);
+	if (e) {
+		EMSG("pthread_create: %s", strerror(e));
+		num_waiters_dec(arg);
+		return false;
+	}
+
+	e = pthread_detach(tid);
+	if (e)
+		EMSG("pthread_detach: %s", strerror(e));
+
+	return true;
+
+}
+
+static bool process_one_request(struct thread_arg *arg)
+{
+	union tee_rpc_invoke request;
+	size_t num_params;
+	struct tee_ioctl_param *params;
+	uint32_t func;
+	uint32_t ret;
+
+	DMSG("looping");
+	memset(&request, 0, sizeof(request));
+	request.recv.num_params = RPC_NUM_PARAMS;
+
+	/* Let it be known that we can deal with meta parameters */
+	params = (struct tee_ioctl_param *)(&request.send + 1);
+	params->attr = TEE_IOCTL_PARAM_ATTR_META;
+
+	num_waiters_inc(arg);
+
+	if (!read_request(arg->fd, &request))
+		return false;
+
+	if (!num_waiters_dec(arg) && !spawn_thread(arg))
+		return false;
+
+	if (!find_params(&request, &func, &num_params, &params))
+		return false;
+
+	switch (func) {
+	case RPC_CMD_LOAD_TA:
+		ret = load_ta(num_params, params);
+		break;
+	case RPC_CMD_FS:
+		ret = tee_supp_fs_process(num_params, params);
+		break;
+	case RPC_CMD_SQL_FS:
+		ret = sql_fs_process(num_params, params);
+		break;
+	case RPC_CMD_RPMB:
+		ret = process_rpmb(num_params, params);
+		break;
+	case RPC_CMD_SHM_ALLOC:
+		ret = process_alloc(arg->fd, num_params, params);
+		break;
+	case RPC_CMD_SHM_FREE:
+		ret = process_free(num_params, params);
+		break;
+	default:
+		EMSG("Cmd [0x%" PRIx32 "] not supported", func);
+		/* Not supported. */
+		ret = TEEC_ERROR_NOT_SUPPORTED;
+		break;
+	}
+
+	request.send.ret = ret;
+	return write_response(arg->fd, &request);
+}
+
+static void *thread_main(void *a)
+{
+	struct thread_arg *arg = a;
+
+	/*
+	 * Now that this thread has been scheduled, compensate for the
+	 * initial increase in spawn_thread() before.
+	 */
+	num_waiters_dec(arg);
+
+	while (!arg->abort) {
+		if (!process_one_request(arg))
+			arg->abort = true;
+	}
+
+	return NULL;
+}
+
 int main(int argc, char *argv[])
 {
-	int fd;
-	union tee_rpc_invoke request;
+	struct thread_arg arg = { .fd = -1 };
+	int e;
+
+	e = pthread_mutex_init(&arg.mutex);
+	if (e) {
+		EMSG("pthread_mutex_init: %s", strerror(e));
+		EMSG("terminating...");
+		exit(EXIT_FAILURE);
+	}
 
 	if (argc > 2)
 		return usage();
 	if (argc == 2) {
-		fd = open_dev(argv[1]);
-		if (fd < 0) {
+		arg.fd = open_dev(argv[1]);
+		if (arg.fd < 0) {
 			EMSG("failed to open \"%s\"", argv[1]);
 			exit(EXIT_FAILURE);
 		}
 	} else {
-		fd = get_dev_fd();
-		if (fd < 0) {
+		arg.fd = get_dev_fd();
+		if (arg.fd < 0) {
 			EMSG("failed to find an OP-TEE supplicant device");
 			exit(EXIT_FAILURE);
 		}
@@ -425,58 +593,12 @@ int main(int argc, char *argv[])
 		exit(EXIT_FAILURE);
 	}
 
-	while (true) {
-		size_t num_params;
-		struct tee_ioctl_param *params;
-		uint32_t func;
-		uint32_t ret;
-
-		DMSG("looping");
-		memset(&request, 0, sizeof(request));
-		request.recv.num_params = RPC_NUM_PARAMS;
-
-		/* Let it be known that we can deal with meta parameters */
-		params = (struct tee_ioctl_param *)(&request.send + 1);
-		params->attr = TEE_IOCTL_PARAM_ATTR_META;
-
-		if (!read_request(fd, &request))
-			break;
-
-		if (!find_params(&request, &func, &num_params, &params))
-			break;
-
-		switch (func) {
-		case RPC_CMD_LOAD_TA:
-			ret = load_ta(num_params, params);
-			break;
-		case RPC_CMD_FS:
-			ret = tee_supp_fs_process(num_params, params);
-			break;
-		case RPC_CMD_SQL_FS:
-			ret = sql_fs_process(num_params, params);
-			break;
-		case RPC_CMD_RPMB:
-			ret = process_rpmb(num_params, params);
-			break;
-		case RPC_CMD_SHM_ALLOC:
-			ret = process_alloc(fd, num_params, params);
-			break;
-		case RPC_CMD_SHM_FREE:
-			ret = process_free(num_params, params);
-			break;
-		default:
-			EMSG("Cmd [0x%" PRIx32 "] not supported", func);
-			/* Not supported. */
-			ret = TEEC_ERROR_NOT_SUPPORTED;
-			break;
-		}
-
-		request.send.ret = ret;
-		if (!write_response(fd, &request))
-			break;
+	while (!arg.abort) {
+		if (!process_one_request(&arg))
+			arg.abort = true;
 	}
 
-	close(fd);
+	close(arg.fd);
 
 	return EXIT_FAILURE;
 }
