@@ -51,6 +51,7 @@
 #include "__tee_ipsocket.h"
 #include "tee_tcpsocket_defines.h"
 #include "tee_tcpsocket_defines_extensions.h"
+#include "tee_udpsocket_defines.h"
 
 #ifndef __aligned
 #define __aligned(x) __attribute__((__aligned__(x)))
@@ -168,8 +169,8 @@ static int fd_flags_add(int fd, int flags)
 	return fcntl(fd, F_SETFL, val);
 }
 
-static TEEC_Result sock_connect(uint32_t ip_vers, const char *server,
-				uint32_t port, int *ret_fd)
+static TEEC_Result sock_connect(uint32_t ip_vers, unsigned int protocol,
+				const char *server, uint32_t port, int *ret_fd)
 {
 	TEEC_Result r = TEEC_ERROR_GENERIC;
 	struct addrinfo hints;
@@ -196,10 +197,19 @@ static TEEC_Result sock_connect(uint32_t ip_vers, const char *server,
 		return TEEC_ERROR_BAD_PARAMETERS;
 	}
 
-	hints.ai_socktype = SOCK_STREAM;
+	if (protocol == TEE_ISOCKET_PROTOCOLID_TCP)
+		hints.ai_socktype = SOCK_STREAM;
+	else if (protocol == TEE_ISOCKET_PROTOCOLID_UDP)
+		hints.ai_socktype = SOCK_DGRAM;
+	else
+		return TEEC_ERROR_BAD_PARAMETERS;
 
-	if (getaddrinfo(server, port_name, &hints, &res0))
-		return TEE_ISOCKET_TCP_ERROR_HOSTNAME;
+	if (getaddrinfo(server, port_name, &hints, &res0)) {
+		if (protocol == TEE_ISOCKET_PROTOCOLID_TCP)
+			return TEE_ISOCKET_TCP_ERROR_HOSTNAME;
+		else
+			return TEE_ISOCKET_UDP_ERROR_HOSTNAME;
+	}
 
 	for (res = res0; res; res = res->ai_next) {
 		fd = socket(res->ai_family, res->ai_socktype, res->ai_protocol);
@@ -258,19 +268,19 @@ static TEEC_Result tee_socket_open(size_t num_params,
 		return TEEC_ERROR_BAD_PARAMETERS;
 
 	instance_id = params[0].u.value.b;
-
-	server = tee_supp_param_to_va(params + 2);
-	if (!server || server[params[2].u.memref.size - 1] != '\0')
-		return TEE_ISOCKET_TCP_ERROR_HOSTNAME;
-
 	port = params[1].u.value.a;
 	protocol = params[1].u.value.b;
 	ip_vers = params[1].u.value.c;
 
-	if (protocol != TEE_ISOCKET_PROTOCOLID_TCP)
-		return TEEC_ERROR_BAD_PARAMETERS;
+	server = tee_supp_param_to_va(params + 2);
+	if (!server || server[params[2].u.memref.size - 1] != '\0') {
+		if (protocol == TEE_ISOCKET_PROTOCOLID_TCP)
+			return TEE_ISOCKET_TCP_ERROR_HOSTNAME;
+		else
+			return TEE_ISOCKET_UDP_ERROR_HOSTNAME;
+	}
 
-	res = sock_connect(ip_vers, server, port, &fd);
+	res = sock_connect(ip_vers, protocol, server, port, &fd);
 	if (res != TEEC_SUCCESS)
 		return res;
 
@@ -520,21 +530,143 @@ static TEEC_Result tee_socket_recv(size_t num_params,
 	res = read_with_timeout(fd, buf, &bytes, params[2].u.value.a);
 	if (res == TEEC_SUCCESS)
 		params[2].u.value.b = bytes;
+
 	return res;;
 }
 
-static TEEC_Result ioctl_set_tcp_recvbuf(int fd, const void *buf, uint32_t blen)
+static TEEC_Result tee_socket_ioctl_tcp(int fd, uint32_t command,
+					void *buf, uint64_t *blen)
 {
-	if (setsockopt(fd, SOL_SOCKET, SO_RCVBUF, buf, blen))
-		return TEEC_ERROR_BAD_PARAMETERS;
-	return TEEC_SUCCESS;
+	switch (command) {
+	case TEE_TCP_SET_RECVBUF:
+		if (setsockopt(fd, SOL_SOCKET, SO_RCVBUF, buf, *blen))
+			return TEEC_ERROR_BAD_PARAMETERS;
+		return TEEC_SUCCESS;
+	case TEE_TCP_SET_SENDBUF:
+		if (setsockopt(fd, SOL_SOCKET, SO_SNDBUF, buf, *blen))
+			return TEEC_ERROR_BAD_PARAMETERS;
+		return TEEC_SUCCESS;
+	default:
+		return TEEC_ERROR_NOT_SUPPORTED;
+	}
 }
 
-static TEEC_Result ioctl_set_tcp_sendbuf(int fd, const void *buf, uint32_t blen)
+static TEEC_Result sa_set_port(struct sockaddr *sa, socklen_t slen,
+			       uint32_t port)
 {
-	if (setsockopt(fd, SOL_SOCKET, SO_SNDBUF, buf, blen))
+	if (sa->sa_family == AF_INET) {
+		struct sockaddr_in *sain = (void *)sa;
+
+		if (slen < sizeof(*sain))
+			return TEEC_ERROR_BAD_PARAMETERS;
+		sain->sin_port = htons(port);
+
+		return TEEC_SUCCESS;
+	}
+
+	if (sa->sa_family == AF_INET6) {
+		struct sockaddr_in6 *sain6 = (void *)sa;
+
+		if (slen < sizeof(*sain6))
+			return TEEC_ERROR_BAD_PARAMETERS;
+		sain6->sin6_port = htons(port);
+
+		return TEEC_SUCCESS;
+	}
+
+	return TEEC_ERROR_BAD_PARAMETERS;
+}
+
+static TEEC_Result sa_get_port(struct sockaddr *sa, socklen_t slen,
+			       uint32_t *port)
+{
+	if (sa->sa_family == AF_INET) {
+		struct sockaddr_in *sain = (void *)sa;
+
+		if (slen < sizeof(*sain))
+			return TEEC_ERROR_BAD_PARAMETERS;
+		*port = ntohs(sain->sin_port);
+
+		return TEEC_SUCCESS;
+	}
+
+	if (sa->sa_family == AF_INET6) {
+		struct sockaddr_in6 *sain6 = (void *)sa;
+
+		if (slen < sizeof(*sain6))
+			return TEEC_ERROR_BAD_PARAMETERS;
+		*port = ntohs(sain6->sin6_port);
+
+		return TEEC_SUCCESS;
+	}
+
+	return TEEC_ERROR_BAD_PARAMETERS;
+}
+
+static TEEC_Result udp_changeaddr(int fd, int family, const char *server,
+				  uint32_t port)
+{
+	TEEC_Result r = TEE_ISOCKET_UDP_ERROR_HOSTNAME;
+	struct addrinfo hints;
+	struct addrinfo *res0;
+	struct addrinfo *res;
+	char port_name[10];
+
+	snprintf(port_name, sizeof(port_name), "%" PRIu32, port);
+
+	memset(&hints, 0, sizeof(hints));
+	hints.ai_family = family;
+	hints.ai_socktype = SOCK_DGRAM;
+	if (getaddrinfo(server, port_name, &hints, &res0))
+		return TEE_ISOCKET_UDP_ERROR_HOSTNAME;
+	for (res = res0; res; res = res->ai_next) {
+		if (connect(fd, res->ai_addr, res->ai_addrlen)) {
+			if (errno == ETIMEDOUT)
+				r = TEE_ISOCKET_ERROR_TIMEOUT;
+			else
+				r = TEE_ERROR_COMMUNICATION;
+			continue;
+		}
+		r = TEEC_SUCCESS;
+		break;
+	}
+	freeaddrinfo(res0);
+
+	return r;
+}
+
+static TEEC_Result tee_socket_ioctl_udp(int fd, uint32_t command,
+					void *buf, uint64_t *blen)
+{
+	TEEC_Result res;
+	struct sockaddr_storage sass;
+	struct sockaddr *sa = (struct sockaddr *)&sass;
+	socklen_t len = sizeof(sass);
+	uint32_t port;
+
+	if (getpeername(fd, sa, &len))
 		return TEEC_ERROR_BAD_PARAMETERS;
-	return TEEC_SUCCESS;
+
+	switch (command) {
+	case TEE_UDP_CHANGEADDR:
+		res = sa_get_port(sa, len, &port);
+		if (res != TEE_SUCCESS)
+			return res;
+
+		if (!blen || *((char *)buf + *blen - 1) != '\0')
+			return TEE_ISOCKET_UDP_ERROR_HOSTNAME;
+
+		return udp_changeaddr(fd, sa->sa_family, buf, port);
+	case TEE_UDP_CHANGEPORT:
+		if (*blen != sizeof(uint32_t))
+			return TEEC_ERROR_BAD_PARAMETERS;
+		memcpy(&port, buf, sizeof(uint32_t));
+		if (connect(fd, sa, len))
+			return TEEC_ERROR_GENERIC;
+		return TEEC_SUCCESS;
+	default:
+		return TEEC_ERROR_NOT_SUPPORTED;
+	}
 }
 
 static TEEC_Result tee_socket_ioctl(size_t num_params,
@@ -545,6 +677,8 @@ static TEEC_Result tee_socket_ioctl(size_t num_params,
 	uint32_t instance_id;
 	uint32_t command;
 	void *buf;
+	int socktype;
+	socklen_t l;
 
 	if (num_params != 3 ||
 	    !chk_pt(params + 0, TEE_IOCTL_PARAM_ATTR_TYPE_VALUE_INPUT) ||
@@ -559,16 +693,21 @@ static TEEC_Result tee_socket_ioctl(size_t num_params,
 	if (fd < 0)
 		return TEEC_ERROR_BAD_PARAMETERS;
 
+	l = sizeof(socktype);
+	if (getsockopt(fd, SOL_SOCKET, SO_TYPE, &socktype, &l))
+		return TEEC_ERROR_BAD_PARAMETERS;
+
 	buf = tee_supp_param_to_va(params + 1);
 
-	switch (command) {
-	case TEE_TCP_SET_RECVBUF:
-		return ioctl_set_tcp_recvbuf(fd, buf, params[1].u.memref.size);
-		break;
-	case TEE_TCP_SET_SENDBUF:
-		return ioctl_set_tcp_sendbuf(fd, buf, params[1].u.memref.size);
+	switch (socktype) {
+	case SOCK_STREAM:
+		return tee_socket_ioctl_tcp(fd, command, buf,
+					    &params[1].u.memref.size);
+	case SOCK_DGRAM:
+		return tee_socket_ioctl_udp(fd, command, buf,
+					    &params[1].u.memref.size);
 	default:
-		return TEEC_ERROR_NOT_SUPPORTED;
+		return TEEC_ERROR_BAD_PARAMETERS;
 	}
 }
 
