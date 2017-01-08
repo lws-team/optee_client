@@ -49,6 +49,7 @@
 #include <tee_supp_fs.h>
 #include <teec_trace.h>
 #include <tee_supplicant.h>
+#include <tee_socket.h>
 #include <unistd.h>
 
 #include "optee_msg_supplicant.h"
