@@ -568,7 +568,7 @@ int main(int argc, char *argv[])
 	struct thread_arg arg = { .fd = -1 };
 	int e;
 
-	e = pthread_mutex_init(&arg.mutex);
+	e = pthread_mutex_init(&arg.mutex, NULL);
 	if (e) {
 		EMSG("pthread_mutex_init: %s", strerror(e));
 		EMSG("terminating...");
