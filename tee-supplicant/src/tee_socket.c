@@ -535,7 +535,7 @@ static TEEC_Result tee_socket_recv(size_t num_params,
 }
 
 static TEEC_Result tee_socket_ioctl_tcp(int fd, uint32_t command,
-					void *buf, uint64_t *blen)
+					void *buf, __u64 *blen)
 {
 	switch (command) {
 	case TEE_TCP_SET_RECVBUF:
@@ -636,7 +636,7 @@ static TEEC_Result udp_changeaddr(int fd, int family, const char *server,
 }
 
 static TEEC_Result tee_socket_ioctl_udp(int fd, uint32_t command,
-					void *buf, uint64_t *blen)
+					void *buf, __u64 *blen)
 {
 	TEEC_Result res;
 	struct sockaddr_storage sass;
