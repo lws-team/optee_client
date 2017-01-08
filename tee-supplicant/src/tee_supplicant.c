@@ -53,6 +53,8 @@
 
 #include "optee_msg_supplicant.h"
 
+#include <pthread.h>
+
 #ifndef __aligned
 #define __aligned(x) __attribute__((__aligned__(x)))
 #endif
