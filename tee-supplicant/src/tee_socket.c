@@ -551,8 +551,9 @@ static TEEC_Result tee_socket_ioctl_tcp(int fd, uint32_t command,
 	}
 }
 
-static TEEC_Result sa_set_port(struct sockaddr *sa, socklen_t slen,
-			       uint32_t port)
+static TEEC_Result __attribute__((unused))
+sa_set_port(struct sockaddr *sa, socklen_t slen,
+	    uint32_t port)
 {
 	if (sa->sa_family == AF_INET) {
 		struct sockaddr_in *sain = (void *)sa;
